@@ -35,25 +35,22 @@ def main() -> int:
     print("  Running stock agent...")
     stock = run_stock_agent()
     if stock["market_open"]:
-        print(f"  Stock done. AAPL {stock['stock_data']['pct_change']:+.2f}%")
+        print(f"  Stock done. AAPL {stock['price']['pct_change']:+.2f}%")
     else:
         print("  Stock done. Market closed today.")
 
-    message = format_daily_message(news, stock)
+    payload = format_daily_message(news, stock)
 
-    # Print to stdout (useful for CI logs and local runs)
-    print("\n" + "=" * 60)
-    print(message)
-    print("=" * 60 + "\n")
-
-    # Save local archive
+    # Save local archive (Markdown)
     reports_dir = Path(__file__).parent / "reports"
     save_report(news["content"], "news", reports_dir)
-    if stock["market_open"]:
-        save_report(stock["content"], "stock", reports_dir)
+    if stock.get("market_open"):
+        synthesis = stock.get("synthesis", "")
+        drivers   = stock.get("key_drivers", "")
+        save_report(f"{stock['signal_verdict']}\n\n{drivers}\n\n{synthesis}", "stock", reports_dir)
 
     # Post to Slack
-    success = post_to_slack(message)
+    success = post_to_slack(payload)
     if success:
         print("  Posted to Slack.")
     else:

@@ -2,9 +2,8 @@ name: Apple Daily Briefing
 
 on:
   schedule:
-    # 21:30 UTC = 1:30 PM PT = 30 min after US market close
-    # Runs weekdays only (Mon-Fri)
-    - cron: '30 21 * * 1-5'
+    # 20:30 UTC = 1:30 PM PDT (UTC-7) — daily stock + news recap, weekdays
+    - cron: '30 20 * * 1-5'
   workflow_dispatch:  # Allow manual trigger from GitHub UI
 
 jobs:
