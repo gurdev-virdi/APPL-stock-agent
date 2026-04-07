@@ -1,6 +1,5 @@
 """
-Formats the news + stock results into a 4-block Slack message and posts via webhook.
-Uses Slack Block Kit for rich formatting.
+Formats news and stock results into separate Slack Block Kit messages and posts via webhook.
 """
 import os
 import requests
@@ -116,48 +115,53 @@ def format_stock_blocks(stock: dict) -> list[dict]:
     ]
 
 
-def format_daily_message(news: dict, stock: dict) -> dict:
-    """
-    Build the full Slack payload (Block Kit).
-    Returns a dict ready to be JSON-serialised and POSTed to the webhook.
-    """
-    total_in  = news["input_tokens"] + stock.get("input_tokens", 0)
-    total_out = news["output_tokens"] + stock.get("output_tokens", 0)
-    cost = (total_in / 1_000_000 * 3.0) + (total_out / 1_000_000 * 15.0)
+def _cost_footer(input_tokens: int, output_tokens: int) -> dict:
+    cost = (input_tokens / 1_000_000 * 3.0) + (output_tokens / 1_000_000 * 15.0)
+    return {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": (
+                    f"Tokens: {input_tokens:,} in / {output_tokens:,} out  |  "
+                    f"Cost: ${cost:.4f}  |  "
+                    f"Model: claude-sonnet-4-6"
+                ),
+            }
+        ],
+    }
 
+
+def format_news_message(news: dict) -> dict:
+    """Build the Apple news Slack payload (Block Kit)."""
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"🍎 Apple Daily Briefing — {news['date']}"},
+            "text": {"type": "plain_text", "text": f"🍎 Apple News — {news['date']}"},
         },
-        # News section — Slack section blocks cap at 3000 chars; truncate if needed.
+        # Slack section blocks cap at 3000 chars; truncate if needed.
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": _truncate("*📰 Apple News & Rumors*\n" + news["content"]),
+                "text": _truncate(news["content"]),
             },
         },
-        {"type": "divider"},
-        # Stock blocks (1-4)
-        *format_stock_blocks(stock),
-        {"type": "divider"},
-        # Footer
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"Tokens: {total_in:,} in / {total_out:,} out  |  "
-                        f"Cost: ${cost:.4f}  |  "
-                        f"Model: claude-sonnet-4-6"
-                    ),
-                }
-            ],
-        },
+        _cost_footer(news["input_tokens"], news["output_tokens"]),
     ]
+    return {"blocks": blocks}
 
+
+def format_stock_message(stock: dict) -> dict:
+    """Build the AAPL stock Slack payload (Block Kit)."""
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"📈 AAPL Stock — {stock['date']}"},
+        },
+        *format_stock_blocks(stock),
+        _cost_footer(stock.get("input_tokens", 0), stock.get("output_tokens", 0)),
+    ]
     return {"blocks": blocks}
 
 

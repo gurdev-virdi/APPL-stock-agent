@@ -15,7 +15,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 from agents.news_agent import run_news_agent
 from agents.stock_agent import run_stock_agent
-from outputs.slack_poster import format_daily_message, post_to_slack
+from outputs.slack_poster import format_news_message, format_stock_message, post_to_slack
 
 
 def save_report(content: str, label: str, reports_dir: Path) -> None:
@@ -39,8 +39,6 @@ def main() -> int:
     else:
         print("  Stock done. Market closed today.")
 
-    payload = format_daily_message(news, stock)
-
     # Save local archive (Markdown)
     reports_dir = Path(__file__).parent / "reports"
     save_report(news["content"], "news", reports_dir)
@@ -49,12 +47,12 @@ def main() -> int:
         drivers   = stock.get("key_drivers", "")
         save_report(f"{stock['signal_verdict']}\n\n{drivers}\n\n{synthesis}", "stock", reports_dir)
 
-    # Post to Slack
-    success = post_to_slack(payload)
-    if success:
-        print("  Posted to Slack.")
-    else:
-        print("  Slack post skipped (no webhook configured or post failed).")
+    # Post to Slack — two separate messages
+    for label, payload in [("news", format_news_message(news)), ("stock", format_stock_message(stock))]:
+        if post_to_slack(payload):
+            print(f"  Posted {label} to Slack.")
+        else:
+            print(f"  Slack {label} post skipped (no webhook configured or post failed).")
 
     return 0
 
