@@ -10,6 +10,16 @@ import requests
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+_SLACK_SECTION_LIMIT = 2990  # Slack hard-caps section block text at 3000 chars
+
+
+def _truncate(text: str) -> str:
+    """Trim text to Slack's section-block character limit."""
+    if len(text) <= _SLACK_SECTION_LIMIT:
+        return text
+    return text[:_SLACK_SECTION_LIMIT - 1] + "…"
+
+
 def _direction_emoji(pct: float) -> str:
     return "📈" if pct >= 0 else "📉"
 
@@ -120,10 +130,13 @@ def format_daily_message(news: dict, stock: dict) -> dict:
             "type": "header",
             "text": {"type": "plain_text", "text": f"🍎 Apple Daily Briefing — {news['date']}"},
         },
-        # News section
+        # News section — Slack section blocks cap at 3000 chars; truncate if needed.
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "*📰 Apple News & Rumors*\n" + news["content"]},
+            "text": {
+                "type": "mrkdwn",
+                "text": _truncate("*📰 Apple News & Rumors*\n" + news["content"]),
+            },
         },
         {"type": "divider"},
         # Stock blocks (1-4)
