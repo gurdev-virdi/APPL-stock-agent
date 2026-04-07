@@ -24,5 +24,4 @@ jobs:
       - name: Run daily briefing
         run: python run_daily.py
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

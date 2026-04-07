@@ -30,7 +30,7 @@ def main() -> int:
 
     print("  Running news agent...")
     news = run_news_agent()
-    print(f"  News done. Tokens: {news['input_tokens']} in / {news['output_tokens']} out")
+    print("  News done.")
 
     print("  Running stock agent...")
     stock = run_stock_agent()

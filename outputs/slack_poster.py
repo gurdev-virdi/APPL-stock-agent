@@ -116,17 +116,12 @@ def format_stock_blocks(stock: dict) -> list[dict]:
 
 
 def _cost_footer(input_tokens: int, output_tokens: int) -> dict:
-    cost = (input_tokens / 1_000_000 * 3.0) + (output_tokens / 1_000_000 * 15.0)
     return {
         "type": "context",
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": (
-                    f"Tokens: {input_tokens:,} in / {output_tokens:,} out  |  "
-                    f"Cost: ${cost:.4f}  |  "
-                    f"Model: claude-sonnet-4-6"
-                ),
+                "text": "Rule-based analysis  |  No API cost  |  Data: yfinance + RSS",
             }
         ],
     }

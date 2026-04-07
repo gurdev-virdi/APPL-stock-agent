@@ -1,13 +1,11 @@
 """
 AAPL stock agent — fetches OHLCV data, computes full technical suite,
-pulls top news headlines, then uses Claude to synthesise key drivers
-and an analyst verdict into a 4-block Slack report.
+pulls top news headlines, then derives key drivers and an analyst verdict
+using rule-based logic (no LLM / no API cost).
 """
-import os
 from datetime import date, datetime, timezone
 import pandas as pd
 import numpy as np
-import anthropic
 import yfinance as yf
 
 # ---------------------------------------------------------------------------
@@ -204,111 +202,96 @@ def _compute_technicals(hist: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Claude synthesis
+# Rule-based synthesis (no LLM required)
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-You are a sell-side equity analyst covering Apple (AAPL).
+def _rule_based_synthesis(ta: dict, headlines: list[str], price_info: dict) -> dict:
+    """Derive signal verdict, key drivers, and synthesis from computed technicals."""
 
-Given today's closing data, technical snapshot, and top news headlines, produce:
+    # ── Signal verdict ────────────────────────────────────────────────────────
+    bullish = sum([
+        ta["sma20_pct"]  > 0,
+        ta["sma50_pct"]  > 0,
+        ta["sma200_pct"] > 0,
+        ta["macd_hist"]  > 0,
+    ])
+    bearish = 4 - bullish
 
-1. SIGNAL_VERDICT: A single crisp line (≤12 words) summarising the technical posture.
-   Examples: "Bullish close above key resistance on above-average volume"
-             "Bearish reversal — RSI overbought, price rejecting upper Bollinger Band"
+    rsi_note = ""
+    if ta["rsi"] > 70:
+        bearish += 1
+        rsi_note = f"RSI overbought at {ta['rsi']:.0f}"
+    elif ta["rsi"] < 30:
+        bullish += 1
+        rsi_note = f"RSI oversold at {ta['rsi']:.0f}"
 
-2. KEY_DRIVERS: Exactly 2–4 bullet points (use "•" prefix) covering:
-   - Top news catalyst today
-   - Sector/macro context relevant to Apple (consumer tech, iPhone demand, Services, tariffs, supply chain)
-   - Any notable analyst upgrades/downgrades/price-target changes (if found)
-   Keep each bullet to one sentence. Cite sources inline (e.g., "per Bloomberg").
+    bias = "Bullish" if bullish > bearish else ("Bearish" if bearish > bullish else "Neutral")
+    vol_part = "on above-average volume" if ta["vol_ratio"] > 1.2 else "on normal volume"
 
-3. SYNTHESIS: 1–2 sentences combining the news context with the technical picture.
-   Be specific — mention at least one indicator by name.
-
-Output format (use these exact section labels, nothing else):
-SIGNAL_VERDICT: <text>
-
-KEY_DRIVERS:
-• <driver 1>
-• <driver 2>
-• <driver 3 if applicable>
-
-SYNTHESIS:
-<text>
-"""
-
-
-def _call_claude(ta: dict, headlines: list[str], price_info: dict) -> dict:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    headlines_text = "\n".join(f"  - {h}" for h in headlines) if headlines else "  (none available)"
-
-    prompt = f"""\
-Today is {date.today().isoformat()}.
-
-AAPL Closing Data:
-  Close: ${price_info['close']:.2f}  Change: {price_info['pct_change']:+.2f}% (${price_info['change']:+.2f})
-  Volume: {ta['today_vol']:,.0f} ({ta['vol_ratio']:.1f}× 30-day avg)
-
-Technical Snapshot:
-  SMA(20): ${ta['sma20']:.2f} ({ta['sma20_pct']:+.1f}% from close)
-  SMA(50): ${ta['sma50']:.2f} ({ta['sma50_pct']:+.1f}% from close)
-  SMA(200): ${ta['sma200']:.2f} ({ta['sma200_pct']:+.1f}% from close)
-  Cross: {ta['cross_status']}
-  RSI(14): {ta['rsi']:.1f} — {ta['rsi_label']}
-  MACD: {ta['macd_line']:.2f} | Signal: {ta['signal_line']:.2f} | Hist: {ta['macd_hist']:+.2f} ({ta['macd_direction']})
-  Bollinger Bands: ${ta['bb_lower']:.2f} / ${ta['bb_mid']:.2f} / ${ta['bb_upper']:.2f} — {ta['bb_label']}
-  ATR(14): ${ta['atr']:.2f}/day
-  52-week High: ${ta['wk52_high']:.2f} ({ta['pct_from_52h']:.1f}%)
-  52-week Low: ${ta['wk52_low']:.2f} ({ta['pct_from_52l']:+.1f}%)
-  Nearest Support: ${ta['support']:.2f} | Resistance: ${ta['resistance']:.2f}
-
-Top AAPL Headlines (last 24h):
-{headlines_text}
-
-Search for any additional market-moving news, analyst actions, or macro events affecting AAPL today.
-Then produce the SIGNAL_VERDICT, KEY_DRIVERS, and SYNTHESIS as instructed.
-"""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
-        messages=[{"role": "user", "content": prompt}],
+    above_both = ta["sma50_pct"] > 0 and ta["sma200_pct"] > 0
+    below_both = ta["sma50_pct"] < 0 and ta["sma200_pct"] < 0
+    sma_ctx = (
+        "above key moving averages" if above_both else
+        "below key moving averages" if below_both else
+        "at mixed moving-average signals"
     )
 
-    # Collect the *last* text block — with server-side web_search the model may
-    # emit a short preamble before tool use; the final synthesis always comes last.
-    raw = ""
-    for block in response.content:
-        if block.type == "text":
-            raw = block.text
+    if bias == "Bullish":
+        signal_verdict = (
+            f"Bullish — {rsi_note}, {ta['macd_direction']} MACD, {vol_part}"
+            if rsi_note else
+            f"Bullish close {sma_ctx} {vol_part}"
+        )
+    elif bias == "Bearish":
+        signal_verdict = (
+            f"Bearish — {rsi_note}, {ta['macd_direction']} MACD, {vol_part}"
+            if rsi_note else
+            f"Bearish close {sma_ctx} {vol_part}"
+        )
+    else:
+        signal_verdict = f"Neutral — mixed signals, {ta['macd_direction']} MACD, RSI {ta['rsi']:.0f}"
 
-    # Parse structured output
-    signal_verdict = ""
-    key_drivers = ""
-    synthesis = ""
+    # ── Key drivers ───────────────────────────────────────────────────────────
+    drivers: list[str] = []
 
-    if "SIGNAL_VERDICT:" in raw:
-        parts = raw.split("SIGNAL_VERDICT:", 1)[1]
-        signal_verdict = parts.split("\n")[0].strip()
+    for h in headlines[:2]:
+        drivers.append(f"• {h}")
 
-    if "KEY_DRIVERS:" in raw:
-        kd_raw = raw.split("KEY_DRIVERS:", 1)[1]
-        if "SYNTHESIS:" in kd_raw:
-            kd_raw = kd_raw.split("SYNTHESIS:")[0]
-        key_drivers = kd_raw.strip()
+    if ta["rsi"] > 65 or ta["rsi"] < 35:
+        ext = "overextended" if ta["rsi"] > 65 else "depressed"
+        drivers.append(f"• RSI(14) at {ta['rsi']:.1f} ({ta['rsi_label']}) — momentum {ext}")
 
-    if "SYNTHESIS:" in raw:
-        synthesis = raw.split("SYNTHESIS:", 1)[1].strip()
+    if ta["vol_ratio"] > 1.5:
+        drivers.append(f"• Volume {ta['vol_ratio']:.1f}× above 30-day average — elevated activity")
+    elif ta["vol_ratio"] < 0.7:
+        drivers.append(f"• Volume {ta['vol_ratio']:.1f}× below 30-day average — low-conviction move")
+
+    cross = ta["cross_status"]
+    if "Golden" in cross:
+        drivers.append(f"• {cross} — long-term bullish structure intact")
+    elif "Death" in cross:
+        drivers.append(f"• {cross} — long-term bearish trend warning")
+
+    key_drivers = "\n".join(drivers) if drivers else "• No significant catalysts identified"
+
+    # ── Synthesis ─────────────────────────────────────────────────────────────
+    verb = "gained" if price_info["pct_change"] > 0 else "lost"
+    sma50_dir = "above" if ta["sma50_pct"] > 0 else "below"
+    mom_dir = "building" if ta["macd_hist"] > 0 else "waning"
+
+    synthesis = (
+        f"AAPL {verb} {abs(price_info['pct_change']):.2f}% to close at ${price_info['close']:.2f}, "
+        f"trading {sma50_dir} the 50-day SMA (${ta['sma50']:.2f}). "
+        f"MACD histogram ({ta['macd_hist']:+.3f}) signals {mom_dir} momentum; "
+        f"RSI at {ta['rsi']:.1f} is {ta['rsi_label'].lower()}."
+    )
 
     return {
-        "signal_verdict": signal_verdict or raw[:120],
+        "signal_verdict": signal_verdict,
         "key_drivers": key_drivers,
         "synthesis": synthesis,
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
+        "input_tokens": 0,
+        "output_tokens": 0,
     }
 
 
@@ -344,9 +327,9 @@ def run_stock_agent() -> dict:
         "volume":     int(hist["Volume"].iloc[-1]),
     }
 
-    ta       = _compute_technicals(hist)
+    ta        = _compute_technicals(hist)
     headlines = _fetch_news(5)
-    claude   = _call_claude(ta, headlines, price_info)
+    synthesis = _rule_based_synthesis(ta, headlines, price_info)
 
     return {
         "date":         hist.index[-1].date().isoformat(),
@@ -354,9 +337,9 @@ def run_stock_agent() -> dict:
         "price":        price_info,
         "ta":           ta,
         "headlines":    headlines,
-        "signal_verdict": claude["signal_verdict"],
-        "key_drivers":    claude["key_drivers"],
-        "synthesis":      claude["synthesis"],
-        "input_tokens":   claude["input_tokens"],
-        "output_tokens":  claude["output_tokens"],
+        "signal_verdict": synthesis["signal_verdict"],
+        "key_drivers":    synthesis["key_drivers"],
+        "synthesis":      synthesis["synthesis"],
+        "input_tokens":   0,
+        "output_tokens":  0,
     }
