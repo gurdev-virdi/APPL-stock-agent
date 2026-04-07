@@ -57,11 +57,12 @@ def run_news_agent() -> dict:
         messages=[{"role": "user", "content": prompt}],
     )
 
+    # Collect the *last* text block — final synthesis always comes after any
+    # server_tool_use / web_search_tool_result blocks.
     content = ""
     for block in response.content:
         if block.type == "text":
             content = block.text
-            break
 
     return {
         "date": today,
