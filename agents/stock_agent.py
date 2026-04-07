@@ -272,17 +272,18 @@ Then produce the SIGNAL_VERDICT, KEY_DRIVERS, and SYNTHESIS as instructed.
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=512,
+        max_tokens=1024,
         system=SYSTEM_PROMPT,
         tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
         messages=[{"role": "user", "content": prompt}],
     )
 
+    # Collect the *last* text block — with server-side web_search the model may
+    # emit a short preamble before tool use; the final synthesis always comes last.
     raw = ""
     for block in response.content:
         if block.type == "text":
             raw = block.text
-            break
 
     # Parse structured output
     signal_verdict = ""
