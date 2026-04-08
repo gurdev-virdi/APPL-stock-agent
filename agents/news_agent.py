@@ -117,15 +117,23 @@ def _parse_feed(xml_text: str, source: str) -> list[dict]:
 def _get_recent_articles(hours: int = 48) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     all_articles: list[dict] = []
+    fetch_errors = 0
 
     for source, url in RSS_FEEDS:
         xml_text = _fetch_url(url)
         if not xml_text:
+            fetch_errors += 1
             continue
         for art in _parse_feed(xml_text, source):
             # Include articles with no parseable date (assume recent)
             if art["pub_dt"] is None or art["pub_dt"] >= cutoff:
                 all_articles.append(art)
+
+    if fetch_errors == len(RSS_FEEDS):
+        raise RuntimeError(
+            "All RSS feeds failed to fetch. "
+            "Check network access or whether the feed URLs have changed."
+        )
 
     # Newest first
     all_articles.sort(
