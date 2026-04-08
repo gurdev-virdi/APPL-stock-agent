@@ -25,21 +25,50 @@ def save_report(content: str, label: str, reports_dir: Path) -> None:
     print(f"  Saved: {path}")
 
 
+def _error_news(reason: str) -> dict:
+    """Fallback news result used when RSS feeds are unavailable."""
+    today = date.today().isoformat()
+    return {
+        "date": today,
+        "content": (
+            f"## Feed Unavailable\n"
+            f"Could not fetch Apple news today: {reason}\n\n"
+            "Sources will be retried at the next scheduled run."
+        ),
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+
 def main() -> int:
     print(f"[apple-agent] Running daily briefing for {date.today().isoformat()}")
+    exit_code = 0
 
+    # --- News agent (failures are isolated so the stock post still runs) -----
     print("  Running news agent...")
-    news = run_news_agent()
-    print("  News done.")
+    try:
+        news = run_news_agent()
+        print("  News done.")
+    except Exception as exc:
+        print(f"  News agent failed: {exc}")
+        news = _error_news(str(exc))
+        exit_code = 1  # Mark run as failed for CI, but continue
 
+    # --- Stock agent ---------------------------------------------------------
     print("  Running stock agent...")
-    stock = run_stock_agent()
-    if stock["market_open"]:
-        print(f"  Stock done. AAPL {stock['price']['pct_change']:+.2f}%")
-    else:
-        print("  Stock done. Market closed today.")
+    try:
+        stock = run_stock_agent()
+        if stock["market_open"]:
+            print(f"  Stock done. AAPL {stock['price']['pct_change']:+.2f}%")
+        else:
+            print("  Stock done. Market closed today.")
+    except Exception as exc:
+        print(f"  Stock agent failed: {exc}")
+        stock = {"market_open": False, "date": date.today().isoformat(),
+                 "input_tokens": 0, "output_tokens": 0}
+        exit_code = 1
 
-    # Save local archive (Markdown)
+    # --- Save local archive --------------------------------------------------
     reports_dir = Path(__file__).parent / "reports"
     save_report(news["content"], "news", reports_dir)
     if stock.get("market_open"):
@@ -47,14 +76,14 @@ def main() -> int:
         drivers   = stock.get("key_drivers", "")
         save_report(f"{stock['signal_verdict']}\n\n{drivers}\n\n{synthesis}", "stock", reports_dir)
 
-    # Post to Slack — two separate messages
+    # --- Post to Slack -------------------------------------------------------
     for label, payload in [("news", format_news_message(news)), ("stock", format_stock_message(stock))]:
         if post_to_slack(payload):
             print(f"  Posted {label} to Slack.")
         else:
             print(f"  Slack {label} post skipped (no webhook configured or post failed).")
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
