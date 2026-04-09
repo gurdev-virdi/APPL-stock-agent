@@ -42,4 +42,4 @@ jobs:
       - name: Run daily briefing
         run: python run_daily.py
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_APPL_NEWS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
