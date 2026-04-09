@@ -44,6 +44,12 @@ def main() -> int:
     print(f"[apple-agent] Running daily briefing for {date.today().isoformat()}")
     exit_code = 0
 
+    # Warn loudly if the Slack webhook is missing — posts will be skipped silently
+    # otherwise, which makes the run look successful when nothing was delivered.
+    if not os.environ.get("SLACK_WEBHOOK_URL"):
+        print("  WARNING: SLACK_WEBHOOK_URL is not set — nothing will be posted to Slack.")
+        print("  Add it to your GitHub repo: Settings → Secrets → Actions → SLACK_WEBHOOK_URL")
+
     # --- News agent (failures are isolated so the stock post still runs) -----
     print("  Running news agent...")
     try:
