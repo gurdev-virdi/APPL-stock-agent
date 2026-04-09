@@ -13,6 +13,7 @@ from agents.stock_agent import (
     _swing_levels, _compute_technicals,
     _rule_based_synthesis,
     _fetch_news,
+    _fetch_live_bar,
     run_stock_agent,
 )
 
@@ -346,83 +347,166 @@ class TestFetchNews(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# run_stock_agent (integration)
+# _fetch_live_bar
 # ---------------------------------------------------------------------------
 
-class TestRunStockAgent(unittest.TestCase):
-    def _hist_today(self, n=300) -> pd.DataFrame:
-        """DataFrame whose last row has today's date."""
-        close = _make_prices(n)
-        hist = _make_ohlcv(close)
-        # Force the last index entry to be today (market-open check)
-        new_idx = list(hist.index[:-1]) + [
-            pd.Timestamp(date.today())
-        ]
-        hist.index = pd.DatetimeIndex(new_idx)
-        return hist
+class TestFetchLiveBar(unittest.TestCase):
+    def _make_intraday(self, n=390, price=175.0, tz="America/New_York") -> pd.DataFrame:
+        """Simulate a day of 1-minute bars ending now."""
+        from datetime import datetime, timezone
+        now = pd.Timestamp.now(tz=tz)
+        idx = pd.date_range(end=now, periods=n, freq="1min", tz=tz)
+        close = pd.Series([price] * n, index=idx)
+        return pd.DataFrame({
+            "Open": close * 0.999, "High": close * 1.002,
+            "Low": close * 0.997, "Close": close,
+            "Volume": pd.Series([500_000] * n, index=idx),
+        })
 
-    def _hist_stale(self, n=300) -> pd.DataFrame:
-        """DataFrame whose last row is 3 days ago (market closed)."""
-        close = _make_prices(n)
-        hist = _make_ohlcv(close)
-        new_idx = list(hist.index[:-1]) + [
-            pd.Timestamp(date.today() - timedelta(days=3))
-        ]
-        hist.index = pd.DatetimeIndex(new_idx)
-        return hist
-
-    def test_market_closed_returns_flag(self):
-        hist = self._hist_stale()
+    def test_returns_expected_keys(self):
+        intraday = self._make_intraday()
         with patch("agents.stock_agent.yf.Ticker") as MockTicker:
             mock = MagicMock()
-            mock.history.return_value = hist
+            mock.history.return_value = intraday
             MockTicker.return_value = mock
-            result = run_stock_agent()
-        self.assertFalse(result["market_open"])
+            result = _fetch_live_bar()
+        self.assertIsNotNone(result)
+        for k in ("price", "open", "high", "low", "volume", "is_today"):
+            self.assertIn(k, result)
 
-    def test_empty_hist_returns_market_closed(self):
+    def test_is_today_true_for_current_data(self):
+        intraday = self._make_intraday()
+        with patch("agents.stock_agent.yf.Ticker") as MockTicker:
+            mock = MagicMock()
+            mock.history.return_value = intraday
+            MockTicker.return_value = mock
+            result = _fetch_live_bar()
+        self.assertTrue(result["is_today"])
+
+    def test_empty_intraday_returns_none(self):
         with patch("agents.stock_agent.yf.Ticker") as MockTicker:
             mock = MagicMock()
             mock.history.return_value = pd.DataFrame()
             MockTicker.return_value = mock
+            result = _fetch_live_bar()
+        self.assertIsNone(result)
+
+    def test_exception_returns_none(self):
+        with patch("agents.stock_agent.yf.Ticker", side_effect=Exception("network error")):
+            result = _fetch_live_bar()
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# run_stock_agent (integration)
+# ---------------------------------------------------------------------------
+
+class TestRunStockAgent(unittest.TestCase):
+    def _hist_recent(self, days_ago=0, n=300) -> pd.DataFrame:
+        """DataFrame whose last row is `days_ago` calendar days back."""
+        close = _make_prices(n)
+        hist = _make_ohlcv(close)
+        new_idx = list(hist.index[:-1]) + [
+            pd.Timestamp(date.today() - timedelta(days=days_ago))
+        ]
+        hist.index = pd.DatetimeIndex(new_idx)
+        return hist
+
+    def _mock_ticker(self, annual_hist, intraday=None, news=None):
+        """
+        Return a mock yf.Ticker whose history() responds to both annual
+        (period='1y') and intraday (period='2d') calls.
+        """
+        mock = MagicMock()
+        mock.news = news or []
+
+        empty = pd.DataFrame()
+
+        def _history(period=None, interval=None, **kwargs):
+            if period == "1y":
+                return annual_hist
+            # intraday call
+            return intraday if intraday is not None else empty
+
+        mock.history.side_effect = _history
+        return mock
+
+    def test_empty_hist_returns_market_closed(self):
+        with patch("agents.stock_agent.yf.Ticker") as MockTicker:
+            MockTicker.return_value = self._mock_ticker(pd.DataFrame())
             result = run_stock_agent()
         self.assertFalse(result["market_open"])
 
-    def test_market_open_returns_all_keys(self):
-        hist = self._hist_today()
+    def test_stale_hist_over_5_days_returns_market_closed(self):
+        """Data more than 5 calendar days old is treated as genuinely unavailable."""
+        hist = self._hist_recent(days_ago=6)
         with patch("agents.stock_agent.yf.Ticker") as MockTicker:
-            mock = MagicMock()
-            mock.history.return_value = hist
-            mock.news = []
-            MockTicker.return_value = mock
+            MockTicker.return_value = self._mock_ticker(hist)
+            result = run_stock_agent()
+        self.assertFalse(result["market_open"])
+
+    def test_recent_hist_within_5_days_shows_data(self):
+        """Data from 3 days ago (e.g. Monday run after a long weekend) is shown."""
+        hist = self._hist_recent(days_ago=3)
+        with patch("agents.stock_agent.yf.Ticker") as MockTicker:
+            MockTicker.return_value = self._mock_ticker(hist)
+            result = run_stock_agent()
+        self.assertTrue(result["market_open"])
+
+    def test_post_close_run_uses_daily_bar_when_no_live_data(self):
+        """After market close with no live bar: falls back to daily close price."""
+        hist = self._hist_recent(days_ago=0)
+        with patch("agents.stock_agent.yf.Ticker") as MockTicker:
+            MockTicker.return_value = self._mock_ticker(hist, intraday=pd.DataFrame())
+            result = run_stock_agent()
+        self.assertTrue(result["market_open"])
+        # Price should come from the daily bar
+        self.assertAlmostEqual(result["price"]["close"], float(hist["Close"].iloc[-1]), places=1)
+
+    def test_live_bar_price_used_when_available(self):
+        """When a live bar is available its price overrides the daily close."""
+        hist = self._hist_recent(days_ago=0)
+        live_price = 999.99  # clearly different from the synthetic daily price
+
+        # Build a 1-minute intraday DataFrame with today's timestamp
+        now_tz = pd.Timestamp.now(tz="America/New_York")
+        idx = pd.DatetimeIndex([now_tz - pd.Timedelta(minutes=1), now_tz], tz="America/New_York")
+        intraday = pd.DataFrame({
+            "Open": [live_price, live_price], "High": [live_price, live_price],
+            "Low": [live_price, live_price], "Close": [live_price, live_price],
+            "Volume": [1_000_000, 1_000_000],
+        }, index=idx)
+
+        with patch("agents.stock_agent.yf.Ticker") as MockTicker:
+            MockTicker.return_value = self._mock_ticker(hist, intraday=intraday)
             result = run_stock_agent()
 
         self.assertTrue(result["market_open"])
+        self.assertAlmostEqual(result["price"]["close"], live_price, places=1)
+
+    def test_returns_all_required_keys(self):
+        hist = self._hist_recent(days_ago=0)
+        with patch("agents.stock_agent.yf.Ticker") as MockTicker:
+            MockTicker.return_value = self._mock_ticker(hist)
+            result = run_stock_agent()
         for k in ("date", "price", "ta", "headlines", "signal_verdict", "key_drivers", "synthesis"):
             self.assertIn(k, result, f"Missing key: {k}")
 
-    def test_market_open_token_counts_are_zero(self):
-        hist = self._hist_today()
+    def test_token_counts_are_zero(self):
+        hist = self._hist_recent(days_ago=0)
         with patch("agents.stock_agent.yf.Ticker") as MockTicker:
-            mock = MagicMock()
-            mock.history.return_value = hist
-            mock.news = []
-            MockTicker.return_value = mock
+            MockTicker.return_value = self._mock_ticker(hist)
             result = run_stock_agent()
         self.assertEqual(result["input_tokens"], 0)
         self.assertEqual(result["output_tokens"], 0)
 
-    def test_price_info_values_are_numeric(self):
-        hist = self._hist_today()
+    def test_price_fields_are_numeric(self):
+        hist = self._hist_recent(days_ago=0)
         with patch("agents.stock_agent.yf.Ticker") as MockTicker:
-            mock = MagicMock()
-            mock.history.return_value = hist
-            mock.news = []
-            MockTicker.return_value = mock
+            MockTicker.return_value = self._mock_ticker(hist)
             result = run_stock_agent()
-        p = result["price"]
         for field in ("close", "open", "high", "low", "change", "pct_change"):
-            self.assertIsInstance(p[field], (int, float), f"{field} not numeric")
+            self.assertIsInstance(result["price"][field], (int, float), f"{field} not numeric")
 
 
 if __name__ == "__main__":

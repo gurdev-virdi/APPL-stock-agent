@@ -3,7 +3,7 @@ AAPL stock agent — fetches OHLCV data, computes full technical suite,
 pulls top news headlines, then derives key drivers and an analyst verdict
 using rule-based logic (no LLM / no API cost).
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -15,19 +15,47 @@ import yfinance as yf
 def _fetch_ohlcv() -> pd.DataFrame | None:
     """
     Fetch 1 year of daily OHLCV data for AAPL.
-    Returns None if today's data is unavailable (weekend / holiday).
+    Returns None only when yfinance returns no data at all.
+    The caller is responsible for deciding whether the most-recent bar
+    is fresh enough to report.
     """
     ticker = yf.Ticker("AAPL")
     hist = ticker.history(period="1y")
+    return hist if not hist.empty else None
 
-    if hist.empty:
+
+def _fetch_live_bar() -> dict | None:
+    """
+    Fetch a 1-minute bar from the last 2 trading days.
+    Returns a dict with keys: price, open, high, low, volume, is_today.
+    Used to get the live price during market hours, or the most recent
+    tick after hours, rather than relying on the daily close bar.
+    Returns None on any failure.
+    """
+    try:
+        ticker = yf.Ticker("AAPL")
+        intraday = ticker.history(period="2d", interval="1m")
+        if intraday.empty:
+            return None
+        last = intraday.iloc[-1]
+        last_ts = intraday.index[-1]
+        # Convert to UTC-aware datetime for comparison
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize("UTC")
+        else:
+            last_ts = last_ts.tz_convert("UTC")
+        is_today = last_ts.date() == datetime.now(timezone.utc).date()
+        return {
+            "price":    round(float(last["Close"]), 2),
+            "open":     round(float(intraday.iloc[0]["Open"]), 2),
+            "high":     round(float(intraday["High"].max()), 2),
+            "low":      round(float(intraday["Low"].min()), 2),
+            "volume":   int(intraday["Volume"].sum()),
+            "is_today": is_today,
+        }
+    except Exception as exc:
+        print(f"  [stock] Live bar fetch failed: {exc}")
         return None
-
-    latest_date = hist.index[-1].date()
-    if latest_date != date.today():
-        return None   # Market closed today
-
-    return hist
 
 
 def _fetch_news(n: int = 5) -> list[str]:
@@ -310,29 +338,64 @@ def run_stock_agent() -> dict:
             "output_tokens": 0,
         }
 
-    close  = hist["Close"]
+    # Reject data older than 5 calendar days (catches genuine outages, not
+    # weekends/holidays where the most recent bar is a day or two back).
+    latest_hist_date = hist.index[-1].date()
+    if (date.today() - latest_hist_date).days > 5:
+        return {
+            "date": date.today().isoformat(),
+            "market_open": False,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+
+    # Try to get a live/recent price tick (1-min bar).
+    # Falls back gracefully to the daily close if unavailable.
+    live = _fetch_live_bar()
+
+    close      = hist["Close"]
     prev_close = float(close.iloc[-2]) if len(close) >= 2 else None
-    current    = float(close.iloc[-1])
+
+    if live:
+        current = live["price"]
+        day_open  = live["open"]
+        day_high  = live["high"]
+        day_low   = live["low"]
+        day_vol   = live["volume"]
+    else:
+        current  = float(close.iloc[-1])
+        day_open = round(float(hist["Open"].iloc[-1]), 2)
+        day_high = round(float(hist["High"].iloc[-1]), 2)
+        day_low  = round(float(hist["Low"].iloc[-1]), 2)
+        day_vol  = int(hist["Volume"].iloc[-1])
+
     change     = current - prev_close if prev_close else 0.0
     pct_change = change / prev_close * 100 if prev_close else 0.0
 
     price_info = {
         "close":      round(current, 2),
-        "open":       round(float(hist["Open"].iloc[-1]), 2),
-        "high":       round(float(hist["High"].iloc[-1]), 2),
-        "low":        round(float(hist["Low"].iloc[-1]), 2),
+        "open":       round(day_open, 2),
+        "high":       round(day_high, 2),
+        "low":        round(day_low, 2),
         "prev_close": round(prev_close, 2) if prev_close else None,
         "change":     round(change, 2),
         "pct_change": round(pct_change, 2),
-        "volume":     int(hist["Volume"].iloc[-1]),
+        "volume":     day_vol,
     }
 
     ta        = _compute_technicals(hist)
     headlines = _fetch_news(5)
     synthesis = _rule_based_synthesis(ta, headlines, price_info)
 
+    # Use the live bar's date if it's from today, otherwise the last daily bar date.
+    report_date = (
+        date.today().isoformat()
+        if (live and live["is_today"])
+        else latest_hist_date.isoformat()
+    )
+
     return {
-        "date":         hist.index[-1].date().isoformat(),
+        "date":         report_date,
         "market_open":  True,
         "price":        price_info,
         "ta":           ta,
